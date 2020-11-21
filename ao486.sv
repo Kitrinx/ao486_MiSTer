@@ -152,7 +152,6 @@ module emu
 //`define DEBUG
 
 assign ADC_BUS  = 'Z;
-assign USER_OUT = '1;
 assign {SDRAM_A, SDRAM_BA, SDRAM_DQ, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
@@ -362,6 +361,69 @@ pll_cfg pll_cfg
 	.reconfig_from_pll(reconfig_from_pll)
 );
 
+
+// Index Name    System
+// 0   = D+    = RX (midi in)
+// 1   = D-    = TX (midi out)
+// 2   = TX-   = I2S Word Select (1 == right)
+// 3   = GND_d = none/mode select?
+// 4   = RX+   = I2S Clk
+// 5   = RX-   = I2S Data
+// 6   = TX+   = none
+
+//assign USER_OUT[1] = UART_TXD;
+//assign USER_OUT[0] = '1;
+assign USER_OUT[6:1] = '1;
+
+reg signed [15:0] i2s_r, i2s_l;
+
+wire i2s_ws = USER_IN[2];
+wire i2s_data = USER_IN[5];
+
+always @(posedge clk_sys) begin : i2s_proc
+	reg [15:0] i2s_buf = '0;
+	reg [4:0] i2s_cnt = 0;
+	reg clk_sr;
+	reg i2s_clk = 0;
+	reg old_clk, old_ws;
+	reg i2s_next = 0;
+
+	clk_sr <= USER_IN[4];
+	old_clk <= i2s_clk;
+
+	// Debounce clock
+	if (&{clk_sr, USER_IN[4]})
+		i2s_clk <= 1;
+	else if (~|{clk_sr, USER_IN[4]})
+		i2s_clk <= 0;
+		
+	// Latch data and ws on rising edge
+	if (i2s_clk && ~old_clk) begin
+
+		if (~i2s_cnt[4]) begin
+			i2s_cnt <= i2s_cnt + 1'd1;
+			i2s_buf[~i2s_cnt[3:0]] <= i2s_data;
+		end
+
+		// Word Select will change 1 clock before the new word starts
+		if (old_ws != i2s_ws)
+			i2s_next <= 1;
+
+		old_ws <= i2s_ws;
+	end
+	
+	if (i2s_next) begin
+		i2s_next <= 0;
+		i2s_cnt <= 0;
+		i2s_buf <= 0;
+
+		if (i2s_ws)
+			i2s_l <= i2s_buf;
+		else
+			i2s_r <= i2s_buf;
+	end
+end
+
 wire [2:0] clk_req = {status[7], syscfg[7] ? syscfg[1:0] : status[6:5]};
 
 reg [2:0] speed;
@@ -451,10 +513,10 @@ end
 
 
 wire        speaker_out;
-reg  [15:0] spk_vol;
+reg [15:0] spk_vol;
 always @(posedge clk_sys) spk_vol <= {1'b0, {3'b000,speaker_out} << status[19:18], 11'd0};
 
-wire [15:0] sb_out_l, sb_out_r;
+wire signed [15:0] sb_out_l, sb_out_r;
 
 assign VGA_F1 = 0;
 assign VGA_SL = 0;
@@ -574,6 +636,13 @@ always @(posedge clk_sys) f60 <= fb_en || (fb_width > 760);
 
 assign DDRAM_ADDR[28:25] = 4'h3;
 
+wire [6:0] serial_in;
+assign serial_in[0] = '1;// USER_IN[0];
+assign serial_in[4:2] = '1;
+
+assign {UART_RTS, UART_TXD, UART_DTR} = 0;
+
+
 system system
 (
 	.clk_sys              (clk_sys),
@@ -647,13 +716,13 @@ system system
 	.ide1_request         (mgmt_req[5:3]),
 	.fdd_request          (mgmt_req[7:6]),
 
-	.serial_rx            (UART_RXD),
-	.serial_tx            (UART_TXD),
-	.serial_cts_n         (UART_CTS),
-	.serial_dcd_n         (UART_DSR),
-	.serial_dsr_n         (UART_DSR),
-	.serial_rts_n         (UART_RTS),
-	.serial_dtr_n         (UART_DTR),
+	.serial_rx            (serial_in[0]),
+	.serial_tx            (USER_OUT[0]),
+	.serial_cts_n         (serial_in[2]),
+	.serial_dcd_n         (serial_in[3]),
+	.serial_dsr_n         (serial_in[4]),
+	.serial_rts_n         (serial_in[5]),
+	.serial_dtr_n         (serial_in[6]),
 	.serial_midi_rate     (midi_en),
 
 	.memcfg               (memcfg),
@@ -670,6 +739,7 @@ system system
 	.DDRAM_RD             (DDRAM_RD),
 	.DDRAM_WE             (DDRAM_WE)
 );
+
 
 wire [7:0] syscfg;
 wire       ps2_reset_n;
@@ -732,11 +802,11 @@ function [15:0] compr; input [15:0] inp;
 	end
 endfunction 
 
-reg [15:0] cmp_l, cmp_r;
-reg [15:0] out_l, out_r;
+reg signed [15:0] cmp_l, cmp_r;
+reg signed [15:0] out_l, out_r;
 always @(posedge clk_sys) begin
-	out_l <= sb_out_l + spk_vol;
-	out_r <= sb_out_r + spk_vol;
+	out_l <= sb_out_l + spk_vol + i2s_l;
+	out_r <= sb_out_r + spk_vol + i2s_r;
 	cmp_l <= compr(out_l);
 	cmp_r <= compr(out_r);
 end
